@@ -44,6 +44,7 @@ import android.os.Environment;
 import android.provider.MediaStore;
 import androidx.core.content.FileProvider;
 import android.util.Base64;
+import android.util.Log;
 
 import org.apache.cordova.BuildHelper;
 import org.apache.cordova.CallbackContext;
@@ -107,7 +108,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
 
     private static final String LOG_TAG = "CameraLauncher";
 
-    //Where did this come from?
+    //Where did this come from?SAVE_TO_ALBUM_SEC
     private static final int CROP_CAMERA = 100;
 
     private static final String TIME_FORMAT = "yyyyMMdd_HHmmss";
@@ -125,6 +126,8 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
     private boolean correctOrientation;     // Should the pictures orientation be corrected
     private boolean orientationCorrected;   // Has the picture's orientation been corrected
     private boolean allowEdit;              // Should we allow the user to crop the image.
+
+    protected final static String[] permissions = { Manifest.permission.CAMERA, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_MEDIA_IMAGES };
 
     public CallbackContext callbackContext;
     private int numPics;
@@ -147,9 +150,11 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
      */
     public boolean execute(String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
         this.callbackContext = callbackContext;
-
-        this.applicationId = cordova.getContext().getPackageName();
+        //Adding an API to CoreAndroid to get the BuildConfigValue
+        //This allows us to not make this a breaking change to embedding
+        this.applicationId = (String) BuildHelper.getBuildConfigValue(cordova.getActivity(), "APPLICATION_ID");
         this.applicationId = preferences.getString("applicationId", this.applicationId);
+
 
         if (action.equals(TAKE_PICTURE_ACTION)) {
             this.srcType = CAMERA;
@@ -191,13 +196,20 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
 
             try {
                 if (this.srcType == CAMERA) {
+                  String[] permissionToCheck = android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ? new String[]{ Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.CAMERA } : new String[]{ Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.CAMERA };
+
+                  Log.d(LOG_TAG, "Checking Permissions.");
+                  if(!hasPermissions(permissionToCheck)) {
+                    PermissionHelper.requestPermissions(this, TAKE_PIC_SEC , permissionToCheck);
+                  } else {
                     this.callTakePicture(destType, encodingType);
+                  }
                 }
                 else if ((this.srcType == PHOTOLIBRARY) || (this.srcType == SAVEDPHOTOALBUM)) {
-                    // FIXME: Stop always requesting the permission
-                    String[] permissions = getPermissions(true, mediaType);
-                    if(!hasPermissions(permissions)) {
-                        PermissionHelper.requestPermissions(this, SAVE_TO_ALBUM_SEC, permissions);
+
+                    String permissionToCheck = android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ? Manifest.permission.READ_MEDIA_IMAGES : Manifest.permission.READ_EXTERNAL_STORAGE;
+                    if(!PermissionHelper.hasPermission(this, permissionToCheck)) {
+                        PermissionHelper.requestPermission(this, SAVE_TO_ALBUM_SEC, permissionToCheck);
                     } else {
                         this.getImage(this.srcType, destType);
                     }
@@ -277,43 +289,30 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
      * @param encodingType           Compression quality hint (0-100: 0=low quality & high compression, 100=compress of max quality)
      */
     public void callTakePicture(int returnType, int encodingType) {
-        String[] storagePermissions = getPermissions(true, mediaType);
-        boolean saveAlbumPermission = hasPermissions(storagePermissions);
-
-        boolean takePicturePermission = PermissionHelper.hasPermission(this, Manifest.permission.CAMERA);
+        boolean saveAlbumPermission = true;
+        boolean takePicturePermission = true;
 
         // CB-10120: The CAMERA permission does not need to be requested unless it is declared
         // in AndroidManifest.xml. This plugin does not declare it, but others may and so we must
         // check the package info to determine if the permission is present.
 
-        if (!takePicturePermission) {
-            takePicturePermission = true;
-            try {
-                PackageManager packageManager = this.cordova.getActivity().getPackageManager();
-                String[] permissionsInPackage = packageManager.getPackageInfo(this.cordova.getActivity().getPackageName(), PackageManager.GET_PERMISSIONS).requestedPermissions;
-                if (permissionsInPackage != null) {
-                    for (String permission : permissionsInPackage) {
-                        if (permission.equals(Manifest.permission.CAMERA)) {
-                            takePicturePermission = false;
-                            break;
-                        }
+        try {
+            PackageManager packageManager = this.cordova.getActivity().getPackageManager();
+            String[] permissionsInPackage = packageManager.getPackageInfo(this.cordova.getActivity().getPackageName(), PackageManager.GET_PERMISSIONS).requestedPermissions;
+            if (permissionsInPackage != null) {
+                for (String permission : permissionsInPackage) {
+                    if (permission.equals(Manifest.permission.CAMERA)) {
+                        takePicturePermission = false;
+                        break;
                     }
                 }
-            } catch (NameNotFoundException e) {
-                // We are requesting the info for our package, so this should
-                // never be caught
             }
+        } catch (NameNotFoundException e) {
+            // We are requesting the info for our package, so this should
+            // never be caught
+            e.printStackTrace();
         }
-
-        if (takePicturePermission && saveAlbumPermission) {
-            takePicture(returnType, encodingType);
-        } else if (saveAlbumPermission) {
-            PermissionHelper.requestPermission(this, TAKE_PIC_SEC, Manifest.permission.CAMERA);
-        } else if (takePicturePermission) {
-            PermissionHelper.requestPermissions(this, TAKE_PIC_SEC, storagePermissions);
-        } else {
-            PermissionHelper.requestPermissions(this, TAKE_PIC_SEC, getPermissions(false, mediaType));
-        }
+        takePicture(returnType, encodingType);
     }
 
     public void takePicture(int returnType, int encodingType)
@@ -1460,12 +1459,14 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
         this.callbackContext = callbackContext;
     }
 
-    private boolean hasPermissions(String[] permissions) {
-        for (String permission: permissions) {
-            if (!PermissionHelper.hasPermission(this, permission)) {
-                return false;
-            }
-        }
-        return true;
+  private boolean hasPermissions(String[] permissions) {
+    for (String permission: permissions) {
+      Log.d(LOG_TAG, "Checking Permissions " + permission);
+      if (!PermissionHelper.hasPermission(this, permission)) {
+        return false;
+      }
     }
+    Log.d(LOG_TAG, "Permissions Accepted.");
+    return true;
+  }
 }
