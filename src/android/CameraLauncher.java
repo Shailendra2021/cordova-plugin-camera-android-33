@@ -272,7 +272,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                     }
                 }
             }
-        } catch (javax.naming.NameNotFoundException e) {
+        } catch (NameNotFoundException e) {
             // We are requesting the info for our package, so this should
             // never be caught
             e.printStackTrace();
